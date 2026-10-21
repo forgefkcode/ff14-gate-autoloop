@@ -1,10 +1,13 @@
 --[=====[
 [[SND Metadata]]
 author: forgefk
-version: 0.2.2
+version: 0.3.0
 description: 金碟遊樂園 G.A.T.E. 自動循環（繁中客戶端）。每 20 分鐘找「活動解說員」問目前的 G.A.T.E.，傳送到現場、跟現場人物報名，場內交給 Saucy 自動玩。Saucy 支援：必中一閃快刀斬魔、暴風倖存者、空軍裝甲駕駛員。兩場之間可用 AutoRetainer 收雇員
 plugin_dependencies:
 - vnavmesh
+function_chat_filters:
+  OnChatMessage:
+    message_regex: "主辦的活動「|舞臺活動的報名已經截止"
 configs:
   JoinSlice:
     default: true
@@ -85,13 +88,24 @@ local TEXT_UPCOMING   = "接下來我們將在開展"     -- 還沒開始
 local TEXT_WARP       = "前往活動的舉辦地點"     -- 要前往活動的舉辦地點嗎？
 
 -- 各 G.A.T.E. 的名稱（GoldSaucerTextData）與現場報名的 NPC（ENpcResident，稱號「G.A.T.E.事件」）
+-- markers：現場 NPC 台詞／確認框裡只有這一場會出現的字（GoldSaucerTalk）。
+-- 仙人掌怪導覽員同時負責空軍裝甲和登高跳跳樂，只能靠這些字或來賓接待員的公告分辨
 local GATES = {
-    { key = "slice", name = "必中一閃快刀斬魔", npcs = { "保鑣的小弟" }, cfg = "JoinSlice" },
-    { key = "wind",  name = "暴風倖存者",       npcs = { "傲慢的咒術士" }, cfg = "JoinWind" },
-    { key = "afo",   name = "空軍裝甲駕駛員",   npcs = { "仙人掌怪導覽員" }, cfg = "JoinAirForce" },
-    { key = "leap",  name = "登高跳跳樂大挑戰", npcs = { "仙人掌怪導覽員" }, cfg = "JoinLeap" },
-    { key = "cliff", name = "搶救小雛鳥大作戰", npcs = { "束手無策的女性", "束手無策的少女" }, cfg = "JoinCliff" },
+    { key = "slice", name = "必中一閃快刀斬魔", npcs = { "保鑣的小弟" }, cfg = "JoinSlice", stage = true,
+      markers = { "保鑣老師" } },
+    { key = "wind",  name = "暴風倖存者",       npcs = { "傲慢的咒術士" }, cfg = "JoinWind", stage = true,
+      markers = { "鼻息" } },
+    { key = "afo",   name = "空軍裝甲駕駛員",   npcs = { "仙人掌怪導覽員" }, cfg = "JoinAirForce",
+      markers = { "特設區域", "騎乘、瞄準、射擊" } },   -- 要前往特設區域嗎？
+    { key = "leap",  name = "登高跳跳樂大挑戰", npcs = { "仙人掌怪導覽員" }, cfg = "JoinLeap",
+      markers = { "賽道", "跳躍比賽", "仙人掌怪獎盃" } },  -- 要前往賽道嗎？
+    { key = "cliff", name = "搶救小雛鳥大作戰", npcs = { "束手無策的女性", "束手無策的少女" }, cfg = "JoinCliff",
+      markers = { "小陸行鳥", "小雛鳥" } },
 }
+
+-- 來賓接待員的公告（NpcYell 2450 / 2452）
+local ANNOUNCE_PATTERN = "主辦的活動「(.-)」"   -- 由金碟遊樂園主辦的活動「X」正在Y區域進行中。
+local TEXT_STAGE_CLOSED = "舞臺活動的報名已經截止"
 
 -- 傳喚鈴（EObj 2000401），位置取自金碟遊樂園的場景配置 bg/ffxiv/wil_w1/evt/w1eb/level/planlive.lgb
 local BELL_NAME = "傳喚鈴"
@@ -401,16 +415,54 @@ local function GateFromText(text)
     for _, g in ipairs(GATES) do
         if text:find(g.name, 1, true) then return g end
     end
-    return nil
-end
-
-local function GateFromNpc(name)
     for _, g in ipairs(GATES) do
-        for _, n in ipairs(g.npcs) do
-            if n == name then return g end
+        for _, m in ipairs(g.markers) do
+            if text:find(m, 1, true) then return g end
         end
     end
     return nil
+end
+
+-- 這個 NPC 負責的所有 G.A.T.E.（仙人掌怪導覽員有兩個）
+local function GatesForNpc(name)
+    local list = {}
+    for _, g in ipairs(GATES) do
+        for _, n in ipairs(g.npcs) do
+            if n == name then list[#list + 1] = g end
+        end
+    end
+    return list
+end
+
+local function GateNames(list)
+    local names = {}
+    for _, g in ipairs(list) do names[#names + 1] = g.name end
+    return table.concat(names, "／")
+end
+
+-- 這一場開始前後收到的來賓接待員公告
+local function AnnouncedGate()
+    local a = State.announce
+    if a == nil or State.targetSlot == nil or a.at < State.targetSlot - 60 then return nil end
+    return a.gate
+end
+
+-- 舞臺型（快刀斬魔、暴風倖存者）這一場的報名已經截止
+local function StageClosed(gate)
+    return gate ~= nil and gate.stage and State.stageClosedAt ~= nil and State.targetSlot ~= nil
+        and State.stageClosedAt >= State.targetSlot
+end
+
+-- 聊天訊息觸發（開頭 function_chat_filters 只放行公告）：只記錄，不做別的事
+function OnChatMessage()
+    local ok, msg = pcall(function() return tostring(TriggerData.message) end)
+    if not ok or msg == nil then return end
+    local name = msg:match(ANNOUNCE_PATTERN)
+    if name ~= nil then
+        State.announce = { gate = GateFromText(name), name = name, at = os.time() }
+    elseif msg:find(TEXT_STAGE_CLOSED, 1, true) then
+        State.stageClosedAt = os.time()
+    end
 end
 
 local function AllJoinNpcNames()
@@ -617,6 +669,11 @@ function Handlers.ASK_KEEPER()
     if Api.AddonReady("SelectYesno") then
         local q = Api.AddonText("SelectYesno")
         if q:find(TEXT_WARP, 1, true) then
+            State.gate = State.gate or AnnouncedGate()
+            if StageClosed(State.gate) then
+                Api.No()
+                return FinishSlot("「" .. State.gate.name .. "」報名已經截止")
+            end
             if State.gate ~= nil and not GateEnabled(State.gate) then
                 Api.No()
                 return FinishSlot("這場是「" .. State.gate.name .. "」，設定不參加")
@@ -686,11 +743,25 @@ function Handlers.JOIN()
         return FinishSlot("報名逾時，等下一場")
     end
 
+    State.gate = State.gate or AnnouncedGate()
+    if StageClosed(State.gate) then
+        return FinishSlot("「" .. State.gate.name .. "」報名已經截止")
+    end
+
     -- 確認框：報名
     if Api.AddonReady("SelectYesno") then
         local q = Api.AddonText("SelectYesno")
         local g = GateFromText(q)
         if g ~= nil then State.gate = g end
+        -- 還分不出是哪一場（仙人掌怪導覽員）：候選裡有不參加的就不冒險
+        if State.gate == nil and State.candidates ~= nil then
+            for _, c in ipairs(State.candidates) do
+                if not GateEnabled(c) then
+                    Api.No()
+                    return FinishSlot("分不出是" .. GateNames(State.candidates) .. "哪一場（確認框：" .. q .. "），不報名")
+                end
+            end
+        end
         if State.gate ~= nil and not GateEnabled(State.gate) then
             Api.No()
             return FinishSlot("這場是「" .. State.gate.name .. "」，設定不參加")
@@ -726,9 +797,18 @@ function Handlers.JOIN()
         if Elapsed() > 15 then return FinishSlot("附近找不到報名的 NPC，等下一場") end
         return nil
     end
-    if State.gate == nil then
-        State.gate = GateFromNpc(npc.Name.TextValue)
-        if State.gate ~= nil then Log("從現場 NPC 判斷是「" .. State.gate.name .. "」") end
+    if State.gate == nil and State.candidates == nil then
+        local list = GatesForNpc(npc.Name.TextValue)
+        if #list == 1 then
+            State.gate = list[1]
+            Log("從現場 NPC 判斷是「" .. State.gate.name .. "」")
+        elseif #list > 1 then
+            State.candidates = list
+            local anyEnabled = false
+            for _, c in ipairs(list) do anyEnabled = anyEnabled or GateEnabled(c) end
+            if not anyEnabled then return FinishSlot(GateNames(list) .. "都設定不參加") end
+            Log("現場 NPC 負責" .. GateNames(list) .. "，看對話或確認框再決定")
+        end
     end
     if State.gate ~= nil and not GateEnabled(State.gate) then
         return FinishSlot("這場是「" .. State.gate.name .. "」，設定不參加")
@@ -829,7 +909,7 @@ local function Transition(next)
     if next == nil or next == State.current then return end
     Log(State.current .. " → " .. next)
     if next == "GO_KEEPER" or next == "WAIT_SLOT" then
-        State.gate = nil
+        State.gate, State.candidates = nil, nil
     end
     State.current = next
     State.enteredAt = os.clock()
