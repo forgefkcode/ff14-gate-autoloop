@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: forgefk
-version: 0.2.1
+version: 0.2.2
 description: 金碟遊樂園 G.A.T.E. 自動循環（繁中客戶端）。每 20 分鐘找「活動解說員」問目前的 G.A.T.E.，傳送到現場、跟現場人物報名，場內交給 Saucy 自動玩。Saucy 支援：必中一閃快刀斬魔、暴風倖存者、空軍裝甲駕駛員。兩場之間可用 AutoRetainer 收雇員
 plugin_dependencies:
 - vnavmesh
@@ -351,12 +351,25 @@ State = {
     errors      = 0,
 }
 
+-- 聊天訊息不能有換行（\r、\n 會讓 SND 直接中止巨集），遊戲文字裡的控制字元一律換成空白；太長的截斷（不切到 UTF-8 字元中間）
+local ECHO_MAX_BYTES = 400
+local function ChatSafe(msg)
+    local s = tostring(msg):gsub("%c", " ")
+    s = s:gsub("  +", " ")
+    if #s > ECHO_MAX_BYTES then
+        local cut = ECHO_MAX_BYTES
+        while cut > 0 and (s:byte(cut + 1) or 0) >= 0x80 and (s:byte(cut + 1) or 0) < 0xC0 do cut = cut - 1 end
+        s = s:sub(1, cut) .. "…"
+    end
+    return s
+end
+
 function Log(msg)
-    if Cfg.EchoLogs == "All" then yield("/echo [GATE] " .. msg) end
+    if Cfg.EchoLogs == "All" then yield("/echo [GATE] " .. ChatSafe(msg)) end
 end
 
 function LogError(msg)
-    if Cfg.EchoLogs ~= "None" then yield("/echo [GATE][錯誤] " .. msg) end
+    if Cfg.EchoLogs ~= "None" then yield("/echo [GATE][錯誤] " .. ChatSafe(msg)) end
 end
 
 local function Elapsed()
@@ -444,7 +457,7 @@ local function HandleTalk()
     local text = Api.AddonText("Talk")
     if text ~= State.lastTalk then
         State.lastTalk, State.talkClicks = text, 0
-        Log("對話：" .. text:gsub("\n", ""))
+        Log("對話：" .. text)
     end
     -- 0.5 秒後點掉（TextAdvance 開著的話它會先點）；同一句點了 3 次還在就改按確認鍵
     State.talkSeenAt = State.talkSeenAt or os.clock()
