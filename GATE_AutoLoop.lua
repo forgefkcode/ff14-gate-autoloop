@@ -1,8 +1,8 @@
 --[=====[
 [[SND Metadata]]
 author: forgefk
-version: 0.1.0
-description: 金碟遊樂園 G.A.T.E. 自動循環（繁中客戶端）。每 20 分鐘找「活動解說員」問目前的 G.A.T.E.，傳送到現場、跟現場人物報名，場內交給 Saucy 自動玩。Saucy 支援：必中一閃快刀斬魔、暴風倖存者、空軍裝甲駕駛員
+version: 0.2.0
+description: 金碟遊樂園 G.A.T.E. 自動循環（繁中客戶端）。每 20 分鐘找「活動解說員」問目前的 G.A.T.E.，傳送到現場、跟現場人物報名，場內交給 Saucy 自動玩。Saucy 支援：必中一閃快刀斬魔、暴風倖存者、空軍裝甲駕駛員。兩場之間可用 AutoRetainer 收雇員
 plugin_dependencies:
 - vnavmesh
 configs:
@@ -33,6 +33,9 @@ configs:
   RetryInterval:
     default: 8
     description: 對話沒反應時，隔幾秒再跟 NPC 對話一次
+  Retainers:
+    default: true
+    description: 兩場之間用 AutoRetainer 收雇員（金碟遊樂園乙太之光廣場的傳喚鈴）。要裝 AutoRetainer 並設定好雇員要做的事
   UseSprint:
     default: true
     description: 走路時使用衝刺
@@ -46,7 +49,9 @@ import("System.Numerics")
 
 --[[
 流程
-  WAIT_SLOT  等下一場（:00 / :20 / :40，地球時間）。開始前 PrepareSeconds 秒走到最近的「活動解說員」
+  WAIT_SLOT  等下一場（:00 / :20 / :40，地球時間）。開始前 PrepareSeconds 秒走到最近的「活動解說員」。
+             空檔夠長、雇員探險回來了 → RETAINERS
+  RETAINERS  走到傳喚鈴、打開雇員清單、交給 AutoRetainer（/ays e），處理完關掉清單
   GO_KEEPER  走到活動解說員旁邊，等到開場
   ASK_KEEPER 跟解說員對話：「現在正在開展「X」活動！」→ 認出是哪個 G.A.T.E. →「要前往活動的舉辦地點嗎？」選是
   WARPING    等傳送完成
@@ -88,10 +93,18 @@ local GATES = {
     { key = "cliff", name = "搶救小雛鳥大作戰", npcs = { "束手無策的女性", "束手無策的少女" }, cfg = "JoinCliff" },
 }
 
+-- 傳喚鈴（EObj 2000401），位置取自金碟遊樂園的場景配置 bg/ffxiv/wil_w1/evt/w1eb/level/planlive.lgb
+local BELL_NAME = "傳喚鈴"
+local BELL_POSITIONS = {
+    Vector3(0.13, 0.00, 14.37),
+    Vector3(-0.36, 0.00, -14.25),
+}
+
 local Cond = {
     occupiedInEvent = 31,
     boundByDuty     = 34,
     betweenAreas    = 45,
+    summoningBell   = 50,
 }
 
 local GA_SPRINT = 4
@@ -106,6 +119,7 @@ local Cfg = {
     PrepareSeconds = Config.Get("PrepareSeconds"),
     JoinWindow     = Config.Get("JoinWindow"),
     RetryInterval  = Config.Get("RetryInterval"),
+    Retainers      = Config.Get("Retainers"),
     UseSprint      = Config.Get("UseSprint"),
     EchoLogs       = Config.Get("EchoLogs"),
 }
@@ -116,6 +130,10 @@ local JOIN_NPC_RANGE  = 40    -- 傳送後在多遠內找現場 NPC
 local JOIN_TRIES      = 4
 local WARP_TIMEOUT    = 20
 local GO_KEEPER_STUCK = 90
+local RETAINER_BUDGET    = 240   -- 離下一場還有 PrepareSeconds + 這麼多秒才去收雇員
+local RETAINER_CHECK     = 30    -- 每幾秒問一次 AutoRetainer 有沒有雇員回來
+local RETAINER_TIMEOUT   = 600
+local GATE_BUSY_SECONDS  = 12 * 60   -- 報名後這段時間內還在場上（快刀斬魔、暴風倖存者），不去收雇員
 
 -------------------------------------------------------------------------------
 -- 2. Api 轉接層
@@ -291,6 +309,17 @@ function Api.SelectString(index)
     yield("/callback SelectString true " .. index)
 end
 
+-- AutoRetainer：這個角色有沒有探險完成的雇員、是否正在處理
+function Api.RetainersReady()
+    local ok, r = pcall(function() return IPC.AutoRetainer.AreAnyRetainersAvailableForCurrentChara() end)
+    return ok and r == true
+end
+
+function Api.AutoRetainerBusy()
+    local ok, r = pcall(function() return IPC.AutoRetainer.IsBusy() end)
+    return ok and r == true
+end
+
 -- 空軍裝甲 / 登高跳跳樂是副本型 G.A.T.E.，開始時會跳任務確認框
 function Api.CommenceDuty()
     if Api.AddonReady("ContentsFinderConfirm") then
@@ -311,6 +340,7 @@ State = {
     targetSlot  = nil,    -- 這次要參加的場次開始時間
     gate        = nil,    -- 這次的 G.A.T.E.（GATES 的一筆）
     gatesJoined = 0,
+    retainerRuns = 0,
     joined      = nil,    -- { gate, slot, mgp }：最近一次報名，用來算這場拿了多少金碟幣
     mgpStart    = 0,
     errors      = 0,
@@ -373,10 +403,10 @@ local function AllJoinNpcNames()
     return names
 end
 
-local function NearestKeeperPos()
+local function NearestPos(list)
     local me = Api.PlayerPos()
-    local best, bestDist = KEEPER_POSITIONS[1], math.huge
-    for _, p in ipairs(KEEPER_POSITIONS) do
+    local best, bestDist = list[1], math.huge
+    for _, p in ipairs(list) do
         local d = Distance(me, p)
         if d < bestDist then best, bestDist = p, d end
     end
@@ -439,6 +469,10 @@ function Handlers.INIT()
         LogError("設定裡沒有開任何一個 G.A.T.E.")
         return "END"
     end
+    State.arLoaded = Cfg.Retainers == true and Api.PluginInstalled("AutoRetainer")
+    if Cfg.Retainers and not State.arLoaded then
+        LogError("沒有載入 AutoRetainer，不會收雇員")
+    end
     State.mgpStart = Api.Mgp()
     Log("要參加：" .. table.concat(on, "、"))
     Log("記得在 Saucy 開啟對應模組（快刀斬魔、暴風倖存者要勾自動移動）")
@@ -496,6 +530,16 @@ function Handlers.WAIT_SLOT()
         return "GO_KEEPER"
     end
 
+    -- 空檔收雇員：離下一場夠久、不在 G.A.T.E. 場上
+    local onStage = State.joined ~= nil and now - State.joined.slot < GATE_BUSY_SECONDS
+    if State.arLoaded and not onStage and nextSlot - now > Cfg.PrepareSeconds + RETAINER_BUDGET
+        and not Api.Condition(Cond.occupiedInEvent) then
+        if State.lastArCheck == nil or os.clock() - State.lastArCheck > RETAINER_CHECK then
+            State.lastArCheck = os.clock()
+            if Api.RetainersReady() then return "RETAINERS" end
+        end
+    end
+
     -- 報名後還有對話框（結算說明等）就點掉
     if not Api.Condition(Cond.occupiedInEvent) then HandleTalk() end
 
@@ -525,7 +569,7 @@ function Handlers.GO_KEEPER()
 
     if not Api.NavReady() then return nil end
     if not Api.NavRunning() then
-        local dest = keeper ~= nil and keeper.Position or NearestKeeperPos()
+        local dest = keeper ~= nil and keeper.Position or NearestPos(KEEPER_POSITIONS)
         Api.NavMoveTo(dest)
         if Cfg.UseSprint then Api.Sprint() end
         State.navTries = (State.navTries or 0) + 1
@@ -683,10 +727,74 @@ function Handlers.JOIN()
     return nil
 end
 
+-- 走到傳喚鈴 → 打開雇員清單 → /ays e 讓 AutoRetainer 處理 → 不忙了就關清單
+function Handlers.RETAINERS()
+    if Api.Territory() ~= SAUCER_TERRITORY then return "WAIT_SLOT" end
+    if Elapsed() > RETAINER_TIMEOUT + 30 then return "WAIT_SLOT" end
+    if Elapsed() > RETAINER_TIMEOUT and State.arPhase ~= "close" then
+        LogError("收雇員逾時，關掉清單")
+        State.arPhase = "close"
+    end
+    State.arPhase = State.arPhase or "walk"
+
+    if State.arPhase == "walk" then
+        if Api.AddonReady("RetainerList") then
+            Log("雇員清單已開，交給 AutoRetainer")
+            yield("/ays e")
+            State.arPhase, State.arStart, State.arBusyAt = "process", os.clock(), os.clock()
+            return nil
+        end
+        if Api.Condition(Cond.betweenAreas) or Api.Condition(Cond.occupiedInEvent) then return nil end
+        local bell, dist = Api.NearestByNames({ BELL_NAME }, nil)
+        if bell ~= nil and dist <= TALK_RANGE then
+            Api.NavStop()
+            if State.lastInteract == nil or os.clock() - State.lastInteract > Cfg.RetryInterval then
+                State.joinTries = (State.joinTries or 0) + 1
+                if State.joinTries > JOIN_TRIES then
+                    LogError("打不開傳喚鈴")
+                    return "WAIT_SLOT"
+                end
+                Api.TargetAndInteract(bell)
+                State.lastInteract = os.clock()
+            end
+            return nil
+        end
+        if Api.NavReady() and not Api.NavRunning() then
+            Log("去傳喚鈴收雇員")
+            Api.NavMoveTo(bell ~= nil and bell.Position or NearestPos(BELL_POSITIONS))
+            if Cfg.UseSprint then Api.Sprint() end
+        end
+        return nil
+    end
+
+    if State.arPhase == "process" then
+        if Api.AutoRetainerBusy() then State.arBusyAt = os.clock() end
+        -- 至少給 5 秒啟動，之後連續 3 秒不忙就算處理完
+        if os.clock() - State.arStart > 5 and os.clock() - State.arBusyAt > 3 then
+            State.arPhase = "close"
+        end
+        return nil
+    end
+
+    -- close
+    if Api.AddonReady("RetainerList") then
+        if State.lastClose == nil or os.clock() - State.lastClose > 1 then
+            yield("/callback RetainerList true -1")
+            State.lastClose = os.clock()
+        end
+        return nil
+    end
+    if Api.Condition(Cond.summoningBell) or Api.Condition(Cond.occupiedInEvent) then return nil end
+    State.retainerRuns = State.retainerRuns + 1
+    State.lastArCheck = os.clock()
+    Log("雇員處理完畢")
+    return "WAIT_SLOT"
+end
+
 function Handlers.END()
     Api.NavStop()
     ReportLastGate()
-    yield(string.format("/echo [GATE] 結束：報名 %d 場，金碟幣 %+d", State.gatesJoined, Api.Mgp() - State.mgpStart))
+    yield(string.format("/echo [GATE] 結束：報名 %d 場，金碟幣 %+d，收雇員 %d 次", State.gatesJoined, Api.Mgp() - State.mgpStart, State.retainerRuns))
     return nil
 end
 
@@ -706,6 +814,7 @@ local function Transition(next)
     State.navTries, State.joinTries, State.lastInteract = 0, 0, nil
     State.closed, State.notYet, State.warpSeen = false, false, false
     State.lastTalk, State.talkSeenAt = nil, nil
+    State.arPhase, State.arStart, State.arBusyAt, State.lastClose = nil, nil, nil, nil
 end
 
 while true do

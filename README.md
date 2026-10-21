@@ -8,6 +8,7 @@
 - Saucy（插件庫 `https://love.puni.sh/ment.json`）：開啟「必中一閃快刀斬魔」「暴風倖存者」「空軍裝甲駕駛員」三個模組，前兩個要勾「自動移動」
 - BossMod：快刀斬魔的閃避要用到
 - TextAdvance（建議）：自動點掉對話框
+- AutoRetainer（選用）：兩場之間收雇員
 
 ## 支援的 G.A.T.E.
 | G.A.T.E. | 設定 | 預設 |
@@ -19,6 +20,12 @@
 | 搶救小雛鳥大作戰 | `JoinCliff` | 關（Saucy 不支援） |
 
 `MaxGates` 是參加幾場後停止，0 = 無限循環。
+
+## 收雇員（AutoRetainer）
+`Retainers` 開著（預設）而且有載入 AutoRetainer 時，在兩場中間的空檔會自動收雇員：
+- 每 30 秒問一次 AutoRetainer 有沒有探險回來的雇員
+- 離下一場還有 5 分鐘以上（`PrepareSeconds` + 240 秒），而且不在快刀斬魔、暴風倖存者的場上（報名後 12 分鐘內），才會去
+- 走到乙太之光廣場的傳喚鈴，打開雇員清單後下 `/ays e`，交給 AutoRetainer 處理（收探險、重派等照你在 AutoRetainer 的設定），處理完會自己關掉清單
 
 ## 狀態
 還沒在遊戲裡實測過。每一步都會用 `[GATE]` 開頭印在聊天欄，有問題就看這些訊息。
