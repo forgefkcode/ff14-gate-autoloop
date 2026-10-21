@@ -7,7 +7,7 @@
 - vnavmesh
 - Saucy（插件庫 `https://love.puni.sh/ment.json`）：開啟「必中一閃快刀斬魔」「暴風倖存者」「空軍裝甲駕駛員」三個模組，前兩個要勾「自動移動」
 - BossMod：快刀斬魔的閃避要用到
-- TextAdvance（建議）：自動點掉對話框
+- TextAdvance：不需要。腳本會自己點掉對話框（`/click Talk Click`，點不掉就按確認鍵小鍵盤 0），開著也沒關係
 - AutoRetainer（選用）：兩場之間收雇員
 
 ## 支援的 G.A.T.E.

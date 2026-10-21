@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: forgefk
-version: 0.2.0
+version: 0.2.1
 description: 金碟遊樂園 G.A.T.E. 自動循環（繁中客戶端）。每 20 分鐘找「活動解說員」問目前的 G.A.T.E.，傳送到現場、跟現場人物報名，場內交給 Saucy 自動玩。Saucy 支援：必中一閃快刀斬魔、暴風倖存者、空軍裝甲駕駛員。兩場之間可用 AutoRetainer 收雇員
 plugin_dependencies:
 - vnavmesh
@@ -297,6 +297,11 @@ function Api.ClickTalk()
     yield("/click Talk Click")
 end
 
+-- /click 沒反應時的保底：送遊戲的確認鍵（預設小鍵盤 0）
+function Api.ConfirmKey()
+    yield("/send NUMPAD0")
+end
+
 function Api.Yes()
     yield("/callback SelectYesno true 0")
 end
@@ -427,21 +432,29 @@ local function FinishSlot(reason)
     return "WAIT_SLOT"
 end
 
--- 對話框照順序處理：Talk 先讀再點掉。回傳讀到的台詞（沒有 Talk 時回 nil）
+-- 對話框（Talk）先讀再點掉，不需要 TextAdvance。回傳讀到的台詞（沒有 Talk 時回 nil）。
+-- 主迴圈每一輪都會呼叫；ASK_KEEPER / JOIN 要看台詞判斷是哪一場，由它們自己呼叫
+local TALK_CLICK_DELAY = 0.5
+local TALK_CLICKS_BEFORE_KEY = 3
 local function HandleTalk()
     if not Api.AddonReady("Talk") then
-        State.talkSeenAt = nil
+        State.talkSeenAt, State.talkClicks = nil, 0
         return nil
     end
     local text = Api.AddonText("Talk")
     if text ~= State.lastTalk then
-        State.lastTalk = text
+        State.lastTalk, State.talkClicks = text, 0
         Log("對話：" .. text:gsub("\n", ""))
     end
-    -- TextAdvance 開著會自己點掉；0.5 秒還在就自己點
+    -- 0.5 秒後點掉（TextAdvance 開著的話它會先點）；同一句點了 3 次還在就改按確認鍵
     State.talkSeenAt = State.talkSeenAt or os.clock()
-    if os.clock() - State.talkSeenAt > 0.5 then
-        Api.ClickTalk()
+    if os.clock() - State.talkSeenAt > TALK_CLICK_DELAY then
+        State.talkClicks = (State.talkClicks or 0) + 1
+        if State.talkClicks > TALK_CLICKS_BEFORE_KEY then
+            Api.ConfirmKey()
+        else
+            Api.ClickTalk()
+        end
         State.talkSeenAt = os.clock()
     end
     return text
@@ -539,9 +552,6 @@ function Handlers.WAIT_SLOT()
             if Api.RetainersReady() then return "RETAINERS" end
         end
     end
-
-    -- 報名後還有對話框（結算說明等）就點掉
-    if not Api.Condition(Cond.occupiedInEvent) then HandleTalk() end
 
     if not State.waitLogged then
         Log(string.format("等下一場 %s", SlotLabel(nextSlot)))
@@ -817,11 +827,15 @@ local function Transition(next)
     State.arPhase, State.arStart, State.arBusyAt, State.lastClose = nil, nil, nil, nil
 end
 
+-- 這兩個狀態要先讀台詞，對話框由它們自己處理
+local READS_TALK = { ASK_KEEPER = true, JOIN = true }
+
 while true do
     if State.current == "END" then
         Handlers.END()
         break
     end
+    if not READS_TALK[State.current] then pcall(HandleTalk) end
     local ok, result = pcall(Handlers[State.current])
     if not ok then
         LogError("例外：" .. tostring(result))
