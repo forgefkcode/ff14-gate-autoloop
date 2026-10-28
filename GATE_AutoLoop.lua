@@ -27,15 +27,23 @@ configs:
   MaxGates:
     default: 0
     description: 參加幾場後停止，0 = 無限循環
+    min: 0
+    max: 9999
   PrepareSeconds:
     default: 60
     description: 下一場開始前幾秒走到活動解說員旁邊等
+    min: 0
+    max: 1200
   JoinWindow:
     default: 300
     description: 每場開始後幾秒內還會去報名（解說員說報名結束會提早放棄）
+    min: 0
+    max: 1200
   RetryInterval:
     default: 8
     description: 對話沒反應時，隔幾秒再跟 NPC 對話一次
+    min: 1
+    max: 120
   Retainers:
     default: true
     description: 兩場之間用 AutoRetainer 收雇員（金碟遊樂園乙太之光廣場的傳喚鈴）。要裝 AutoRetainer 並設定好雇員要做的事
